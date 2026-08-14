@@ -15,6 +15,7 @@
 #include "main.h"
 #include "mesh/compression/unishox2.h"
 #include "meshUtils.h"
+#include "PrivateUplink.h"
 #include "meshtastic/atak.pb.h"
 #include "sleep.h"
 #include "target_specific.h"
@@ -333,7 +334,9 @@ void PositionModule::sendOurPosition()
     LOG_INFO("Send pos@%x:6 to mesh (wantReplies=%d)", localPosition.timestamp, requestReplies);
     for (uint8_t channelNum = 0; channelNum < 8; channelNum++) {
         if (getPositionPrecisionForChannel(channelNum) != 0) {
-            sendOurPosition(NODENUM_BROADCAST, requestReplies, channelNum);
+            // Fork customization: PKC-encrypt our own position to a fixed destination instead
+            // of channel-PSK broadcasting it - see PrivateUplink.h.
+            sendOurPosition(MESHTASTIC_PRIVATE_UPLINK_DEST_NODENUM, requestReplies, channelNum);
             return;
         }
     }

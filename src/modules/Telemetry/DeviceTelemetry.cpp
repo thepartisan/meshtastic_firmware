@@ -7,6 +7,7 @@
 #include "RTC.h"
 #include "RadioLibInterface.h"
 #include "Router.h"
+#include "PrivateUplink.h"
 #include "TransmitHistory.h"
 #include "configuration.h"
 #include "main.h"
@@ -31,7 +32,10 @@ int32_t DeviceTelemetryModule::runOnce()
         airTime->isTxAllowedChannelUtil(!isImpoliteRole) && airTime->isTxAllowedAirUtil() &&
         config.device.role != meshtastic_Config_DeviceConfig_Role_CLIENT_HIDDEN &&
         moduleConfig.telemetry.device_telemetry_enabled) {
-        sendTelemetry();
+        // Fork customization: PKC-encrypt our own telemetry to a fixed destination instead
+        // of channel-PSK broadcasting it - see PrivateUplink.h. TELEMETRY_APP isn't excluded
+        // from PKC upstream, so no Router.cpp change is needed for this one.
+        sendTelemetry(MESHTASTIC_PRIVATE_UPLINK_DEST_NODENUM);
         if (transmitHistory)
             transmitHistory->setLastSentToMesh(TX_HISTORY_KEY_DEVICE_TELEMETRY);
     } else if (service->isToPhoneQueueEmpty()) {
