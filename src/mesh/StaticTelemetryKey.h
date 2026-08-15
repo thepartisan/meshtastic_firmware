@@ -1,0 +1,112 @@
+#pragma once
+
+#include "Channels.h"
+#include "CryptoEngine.h"
+#include "MeshTypes.h"
+#include "mesh-pb-constants.h"
+
+/*
+ * Fork customization: optionally encrypt Position/Telemetry payloads with a static,
+ * pre-shared AES key before the normal channel-PSK layer, so that only holders of
+ * that key can read the actual position/telemetry content - even though the packet
+ * itself still travels as a normal broadcast on the public channel (so random
+ * strangers' gateways still relay it to MQTT as usual; only the payload is opaque).
+ *
+ * The key is NOT a new config field - it's channel slot
+ * MESHTASTIC_STATIC_TELEMETRY_KEY_CHANNEL_INDEX's PSK, reused purely as key storage.
+ * This makes it settable from the *stock* Meshtastic app/CLI with zero
+ * firmware-specific tooling, e.g.:
+ *   meshtastic --ch-set psk base64:<your-key> --ch-index 7 --ch-add
+ *   meshtastic --ch-set name "do-not-use" --ch-index 7
+ * This channel is never used for actual message routing - only its PSK is read.
+ *
+ * Toggle: channel 7's role must be SECONDARY *and* it must have a non-empty PSK (see
+ * getStaticTelemetryKey()). Anything else (DISABLED, PRIMARY, or SECONDARY with an
+ * empty PSK, which is the factory-default state) means "off" - Position/Telemetry
+ * payloads are sent/received as plain, unmodified protobufs, identical to stock
+ * firmware.
+ */
+#define MESHTASTIC_STATIC_TELEMETRY_KEY_CHANNEL_INDEX 7
+
+/**
+ * Returns true and populates keyOut if a static telemetry key is configured
+ * (channel MESHTASTIC_STATIC_TELEMETRY_KEY_CHANNEL_INDEX, role SECONDARY, non-empty
+ * PSK). Returns false ("off") otherwise.
+ */
+inline bool getStaticTelemetryKey(CryptoKey &keyOut)
+{
+    meshtastic_Channel &ch = channels.getByIndex(MESHTASTIC_STATIC_TELEMETRY_KEY_CHANNEL_INDEX);
+    if (!ch.has_settings || ch.role != meshtastic_Channel_Role_SECONDARY || ch.settings.psk.size == 0)
+        return false;
+
+    keyOut = channels.getKey(MESHTASTIC_STATIC_TELEMETRY_KEY_CHANNEL_INDEX);
+    return keyOut.length > 0;
+}
+
+/**
+ * Build the 16-byte AES-CTR nonce (packet_id || from_node, zero-padded) matching the
+ * same scheme the HA integration's decoder already implements for channel-PSK
+ * decryption - reused here for the static telemetry key so both sides of the pipe
+ * use identical primitives.
+ */
+inline void buildStaticTelemetryNonce(uint32_t fromNode, uint64_t packetId, uint8_t nonceOut[16])
+{
+    memset(nonceOut, 0, 16);
+    memcpy(nonceOut, &packetId, sizeof(uint64_t));
+    memcpy(nonceOut + sizeof(uint64_t), &fromNode, sizeof(uint32_t));
+}
+
+/**
+ * Encrypt p->decoded.payload in place with the static telemetry key, if one is
+ * configured. No-op ("off") if it isn't. Call this after allocDataProtobuf() (so
+ * p->id/p->from are already finalized) and before handing the packet to
+ * service->sendToMesh().
+ */
+inline void encryptStaticTelemetryPayload(meshtastic_MeshPacket *p)
+{
+    CryptoKey key;
+    if (!getStaticTelemetryKey(key))
+        return;
+
+    uint8_t nonce[16];
+    buildStaticTelemetryNonce(getFrom(p), p->id, nonce);
+
+    crypto->encryptAESCtr(key, nonce, p->decoded.payload.size, p->decoded.payload.bytes);
+}
+
+/**
+ * Attempt to decrypt+decode a Position/Telemetry payload that failed to pb_decode as
+ * plaintext, using the static telemetry key (AES-CTR is symmetric, so the same
+ * encryptAESCtr() call used for sending also decrypts). Returns false immediately
+ * ("off", or wrong portnum, or nothing configured) without touching *scratch.
+ *
+ * This is what lets two modded nodes with the same channel-7 key transparently
+ * exchange encrypted Position/Telemetry over LoRa directly (no MQTT/HA involved):
+ * a successful decode here feeds straight into the module's normal
+ * handleReceivedProtobuf() callback, so NodeDB and the app/CLI see it exactly like
+ * any other telemetry update.
+ */
+inline bool tryDecodeStaticTelemetryEncrypted(const meshtastic_MeshPacket &mp, const pb_msgdesc_t *fields, void *scratch,
+                                              size_t scratchSize)
+{
+    if (mp.decoded.portnum != meshtastic_PortNum_POSITION_APP && mp.decoded.portnum != meshtastic_PortNum_TELEMETRY_APP)
+        return false;
+
+    CryptoKey key;
+    if (!getStaticTelemetryKey(key))
+        return false;
+
+    size_t len = mp.decoded.payload.size;
+    if (len == 0 || len > sizeof(mp.decoded.payload.bytes))
+        return false;
+
+    uint8_t buf[sizeof(mp.decoded.payload.bytes)];
+    memcpy(buf, mp.decoded.payload.bytes, len);
+
+    uint8_t nonce[16];
+    buildStaticTelemetryNonce(getFrom(&mp), mp.id, nonce);
+    crypto->encryptAESCtr(key, nonce, len, buf);
+
+    memset(scratch, 0, scratchSize);
+    return pb_decode_from_bytes(buf, len, fields, scratch);
+}

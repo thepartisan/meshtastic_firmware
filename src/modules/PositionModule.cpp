@@ -7,6 +7,7 @@
 #include "PositionPrecision.h"
 #include "RTC.h"
 #include "Router.h"
+#include "StaticTelemetryKey.h"
 #include "TransmitHistory.h"
 #include "TypeConversions.h"
 #include "airtime.h"
@@ -370,6 +371,11 @@ void PositionModule::sendOurPosition(NodeNum dest, bool wantReplies, uint8_t cha
 
     if (channel > 0)
         p->channel = channel;
+
+    // Fork customization: encrypt the payload with a static, pre-shared key before
+    // the normal channel-PSK layer, if one is configured - see StaticTelemetryKey.h.
+    // No-op if none is configured.
+    encryptStaticTelemetryPayload(p);
 
     service->sendToMesh(p, RX_SRC_LOCAL, true);
 

@@ -1,5 +1,6 @@
 #pragma once
 #include "SinglePortModule.h"
+#include "StaticTelemetryKey.h"
 
 /**
  * A base class for mesh modules that assume that they are sending/receiving one particular protobuf based
@@ -91,6 +92,15 @@ template <class T> class ProtobufModule : protected SinglePortModule
                 decoded = &scratch;
                 LOG_INFO("Received %s from=0x%0x, id=0x%x, portnum=%d, payloadlen=%d", name, mp.from, mp.id, p.portnum,
                          p.payload.size);
+            } else if (tryDecodeStaticTelemetryEncrypted(mp, fields, &scratch, sizeof(scratch))) {
+                // Fork customization: didn't decode as plaintext - if this is
+                // Position/Telemetry and we have a static telemetry key configured
+                // (see StaticTelemetryKey.h), try decrypting it and re-parsing. This
+                // is what lets two modded nodes exchange encrypted position/telemetry
+                // transparently over LoRa, without MQTT/HA in the loop at all.
+                decoded = &scratch;
+                LOG_INFO("Received %s (static-key decrypted) from=0x%0x, id=0x%x, portnum=%d", name, mp.from, mp.id,
+                         p.portnum);
             } else {
                 LOG_ERROR("Error decoding proto module!");
                 // if we can't decode it, nobody can process it!
@@ -111,6 +121,9 @@ template <class T> class ProtobufModule : protected SinglePortModule
             memset(&scratch, 0, sizeof(scratch));
             const meshtastic_Data &p = mp.decoded;
             if (pb_decode_from_bytes(p.payload.bytes, p.payload.size, fields, &scratch)) {
+                decoded = &scratch;
+            } else if (tryDecodeStaticTelemetryEncrypted(mp, fields, &scratch, sizeof(scratch))) {
+                // Fork customization: see the matching branch in handleReceived() above.
                 decoded = &scratch;
             } else {
                 LOG_ERROR("Error decoding proto module!");
