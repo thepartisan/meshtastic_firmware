@@ -4,6 +4,7 @@
 #include "CryptoEngine.h"
 #include "MeshTypes.h"
 #include "mesh-pb-constants.h"
+#include <cstring>
 
 /*
  * Fork customization: optionally encrypt Position/Telemetry payloads with a static,
@@ -17,14 +18,17 @@
  * This makes it settable from the *stock* Meshtastic app/CLI with zero
  * firmware-specific tooling, e.g.:
  *   meshtastic --ch-set psk base64:<your-key> --ch-index 7 --ch-add
- *   meshtastic --ch-set name "do-not-use" --ch-index 7
- * This channel is never used for actual message routing - only its PSK is read.
+ * This channel is reserved for key storage only - it is never used for actual
+ * message routing or transmission (see the exclusions in PositionModule.cpp,
+ * Channels::anyMqttEnabled(), and MQTT::onSend()).
  *
- * Toggle: channel 7's role must be SECONDARY *and* it must have a non-empty PSK (see
- * staticTelemetryKeyConfigured()). Anything else (DISABLED, PRIMARY, or SECONDARY with
- * an empty PSK, which is the factory-default state) means "off" - Position/Telemetry
- * payloads are sent/received as plain, unmodified protobufs, identical to stock
- * firmware.
+ * Toggle: channel 7 must simply have a non-empty PSK (see
+ * staticTelemetryKeyConfigured()) - role (Disabled/Primary/Secondary) is
+ * deliberately ignored. Mobile apps generally don't expose an explicit role
+ * picker (role is normally inferred from a channel's position/how it was
+ * added), so requiring a specific role made this unreachable from some
+ * clients. A bare PSK is the lowest common denominator every Meshtastic
+ * client (app, CLI, or otherwise) can set.
  *
  * Implementation note: Channels::getKey() (the only way to read a channel's raw,
  * expanded key bytes) is private - the rest of the firmware never extracts raw key
@@ -41,24 +45,36 @@
 #define MESHTASTIC_STATIC_TELEMETRY_KEY_CHANNEL_INDEX 7
 
 /**
- * Returns true if a static telemetry key is configured (channel
- * MESHTASTIC_STATIC_TELEMETRY_KEY_CHANNEL_INDEX, role SECONDARY, non-empty PSK).
- * Returns false ("off") otherwise.
+ * Returns true if a static telemetry key is configured: channel
+ * MESHTASTIC_STATIC_TELEMETRY_KEY_CHANNEL_INDEX simply has a non-empty PSK. Role is
+ * intentionally ignored - see the file header comment. Returns false ("off")
+ * otherwise (no settings, or an empty/unset PSK, which is the factory-default
+ * state).
  */
 inline bool staticTelemetryKeyConfigured()
 {
     meshtastic_Channel &ch = channels.getByIndex(MESHTASTIC_STATIC_TELEMETRY_KEY_CHANNEL_INDEX);
-    return ch.has_settings && ch.role == meshtastic_Channel_Role_SECONDARY && ch.settings.psk.size > 0;
+    return ch.has_settings && ch.settings.psk.size > 0;
 }
 
 /**
  * Encrypt p->decoded.payload in place with the static telemetry key, if one is
- * configured. No-op ("off") if it isn't. Call this after allocDataProtobuf() (so
- * p->id/p->from are already finalized) and before handing the packet to
- * service->sendToMesh().
+ * configured and this is a Position or Telemetry packet. No-op otherwise. Called
+ * centrally from MeshService::sendToMesh() - right before the packet is handed to
+ * the router for local dispatch/actual transmission, and *after* any phone/CLI echo
+ * copy has already been taken - so this fork-only encryption layer never corrupts
+ * what the sending device's own app/CLI shows for a packet it just sent (stock apps
+ * have no way to decrypt this layer themselves). Do not call this a second time on
+ * the same packet - AES-CTR is not idempotent, a second pass would scramble the
+ * already-ciphertext bytes into neither plaintext nor correctly single-encrypted
+ * data.
  */
 inline void encryptStaticTelemetryPayload(meshtastic_MeshPacket *p)
 {
+    if (p->which_payload_variant != meshtastic_MeshPacket_decoded_tag)
+        return;
+    if (p->decoded.portnum != meshtastic_PortNum_POSITION_APP && p->decoded.portnum != meshtastic_PortNum_TELEMETRY_APP)
+        return;
     if (!staticTelemetryKeyConfigured())
         return;
 
@@ -100,4 +116,33 @@ inline bool tryDecodeStaticTelemetryEncrypted(const meshtastic_MeshPacket &mp, c
 
     memset(scratch, 0, scratchSize);
     return pb_decode_from_bytes(buf, len, fields, scratch);
+}
+
+/**
+ * Returns true if re-encoding *decoded (as decoded by `fields`) reproduces `payload`
+ * byte-for-byte. Used to tell whether a "successful" plaintext pb_decode() of a
+ * Position/Telemetry payload was probably genuine, or ciphertext that merely
+ * happened to look like valid protobuf wire format (see
+ * ProtobufModule::decodeStaticTelemetryAware() in ProtobufModule.h).
+ *
+ * This check is meaningful in nanopb specifically because - unlike some protobuf
+ * runtimes (e.g. the Python implementation used by this project's Home Assistant
+ * integration, which had this same false-positive problem) - nanopb does not
+ * preserve unrecognized field numbers; it simply discards them while decoding
+ * (see nanopb's pb_decode(), which skips unknown fields rather than storing them
+ * for later re-serialization). So random ciphertext that happens to contain a few
+ * bytes forming a well-formed tag/wire-type/length sequence for an *unknown* field
+ * number will decode "successfully" but then re-encode to something shorter or
+ * different, since those bytes were never actually kept. Only a genuine, exact
+ * encoding of *only* recognized fields with *exactly* the original field values can
+ * survive this round trip unchanged.
+ */
+inline bool payloadRoundTripsPlausibly(const uint8_t *payload, size_t len, const pb_msgdesc_t *fields, const void *decoded)
+{
+    if (len == 0 || len > member_size(meshtastic_Data, payload.bytes))
+        return false;
+
+    uint8_t reencoded[member_size(meshtastic_Data, payload.bytes)];
+    size_t reencodedLen = pb_encode_to_bytes(reencoded, sizeof(reencoded), fields, decoded);
+    return reencodedLen == len && memcmp(reencoded, payload, len) == 0;
 }

@@ -333,6 +333,14 @@ void PositionModule::sendOurPosition()
     // If we changed channels, ask everyone else for their latest info
     LOG_INFO("Send pos@%x:6 to mesh (wantReplies=%d)", localPosition.timestamp, requestReplies);
     for (uint8_t channelNum = 0; channelNum < 8; channelNum++) {
+        // Fork customization: channel MESHTASTIC_STATIC_TELEMETRY_KEY_CHANNEL_INDEX
+        // is reserved for static-telemetry-key storage (see StaticTelemetryKey.h)
+        // and must never be selected as an actual transmit channel - doing so would
+        // silently reroute position broadcasts off the intended channel (e.g.
+        // LongFast) onto a private channel hash nobody else is listening for,
+        // rather than merely adding an extra encryption layer on top.
+        if (channelNum == MESHTASTIC_STATIC_TELEMETRY_KEY_CHANNEL_INDEX)
+            continue;
         if (getPositionPrecisionForChannel(channelNum) != 0) {
             sendOurPosition(NODENUM_BROADCAST, requestReplies, channelNum);
             return;
@@ -372,11 +380,9 @@ void PositionModule::sendOurPosition(NodeNum dest, bool wantReplies, uint8_t cha
     if (channel > 0)
         p->channel = channel;
 
-    // Fork customization: encrypt the payload with a static, pre-shared key before
-    // the normal channel-PSK layer, if one is configured - see StaticTelemetryKey.h.
-    // No-op if none is configured.
-    encryptStaticTelemetryPayload(p);
-
+    // Fork customization: MeshService::sendToMesh() applies the static telemetry
+    // key (if configured) centrally - see StaticTelemetryKey.h - so the phone/CLI
+    // echo of this packet still shows the real plaintext position.
     service->sendToMesh(p, RX_SRC_LOCAL, true);
 
     if (IS_ONE_OF(config.device.role, meshtastic_Config_DeviceConfig_Role_TRACKER,

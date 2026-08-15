@@ -11,6 +11,7 @@
 #include "NodeDB.h"
 #include "PowerFSM.h"
 #include "RTC.h"
+#include "StaticTelemetryKey.h"
 #include "TypeConversions.h"
 #include "graphics/draw/MessageRenderer.h"
 #include "main.h"
@@ -249,6 +250,23 @@ void MeshService::sendToMesh(meshtastic_MeshPacket *p, RxSource src, bool ccToPh
     uint32_t mesh_packet_id = p->id;
     nodeDB->updateFrom(*p); // update our local DB for this packet (because phone might have sent position packets etc...)
 
+    // Fork customization: snapshot the phone/CLI echo copy *before* applying the
+    // static telemetry key below (see StaticTelemetryKey.h). Stock apps have no way
+    // to decrypt that fork-only layer, so without this snapshot the sending
+    // device's own live view of a packet it just sent would show garbage for
+    // Position/Telemetry the moment the feature is enabled. sendToPhone() already
+    // routinely accepts plain (undecoded_tag) packets that never went through
+    // Router::send() at all (e.g. DeviceTelemetryModule's phone-only stats), so
+    // this doesn't need to match whatever wire form `p` ends up in below.
+    meshtastic_MeshPacket *phoneCopy = nullptr;
+    if (ccToPhone) {
+        DEBUG_HEAP_BEFORE;
+        phoneCopy = packetPool.allocCopy(*p);
+        DEBUG_HEAP_AFTER("MeshService::sendToMesh", phoneCopy);
+    }
+
+    encryptStaticTelemetryPayload(p);
+
     // Note: We might return !OK if our fifo was full, at that point the only option we have is to drop it
     ErrorCode res = router->sendLocal(p, src);
 
@@ -260,12 +278,12 @@ void MeshService::sendToMesh(meshtastic_MeshPacket *p, RxSource src, bool ccToPh
         LOG_DEBUG("Can't send status to phone");
     }
 
-    if ((res == ERRNO_OK || res == ERRNO_SHOULD_RELEASE) && ccToPhone) { // Check if p is not released in case it couldn't be sent
-        DEBUG_HEAP_BEFORE;
-        auto a = packetPool.allocCopy(*p);
-        DEBUG_HEAP_AFTER("MeshService::sendToMesh", a);
-
-        sendToPhone(a);
+    if (phoneCopy) {
+        if (res == ERRNO_OK || res == ERRNO_SHOULD_RELEASE) { // Check if p is not released in case it couldn't be sent
+            sendToPhone(phoneCopy);
+        } else {
+            releaseToPool(phoneCopy);
+        }
     }
 
     // Router may ask us to release the packet if it wasn't sent

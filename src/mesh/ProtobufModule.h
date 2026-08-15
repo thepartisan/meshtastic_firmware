@@ -72,6 +72,50 @@ template <class T> class ProtobufModule : protected SinglePortModule
     }
 
   private:
+    /**
+     * Fork customization: decode mp's Data.payload into *scratch, transparently
+     * handling the static-telemetry-key layer (see StaticTelemetryKey.h) for
+     * Position/Telemetry.
+     *
+     * A bare "did pb_decode() succeed" check isn't a reliable signal that a payload
+     * is genuinely plaintext: this project's Home Assistant integration hit the
+     * same problem on its Python decoder and needed a stronger heuristic (>=2
+     * recognized fields AND an exact re-encode round trip) because Python protobuf
+     * preserves unrecognized fields byte-for-byte. nanopb behaves differently - it
+     * discards unrecognized field numbers while decoding rather than preserving
+     * them - which makes a plain round-trip check (payloadRoundTripsPlausibly())
+     * sufficient here on its own.
+     *
+     * When a static key is configured and a "successful" plaintext decode doesn't
+     * round-trip, this prefers a successful decrypt-and-decode instead. If the
+     * decrypt attempt *also* fails, the original (still probably-wrong) plaintext
+     * parse is kept rather than rejecting the packet outright - this must never be
+     * more aggressive than stock firmware for traffic that isn't actually using
+     * this fork's feature.
+     *
+     * Returns false only if neither plaintext nor decrypted decoding produced
+     * anything at all.
+     */
+    bool decodeStaticTelemetryAware(const meshtastic_MeshPacket &mp, T *scratch)
+    {
+        const meshtastic_Data &p = mp.decoded;
+        bool plaintextOk = pb_decode_from_bytes(p.payload.bytes, p.payload.size, fields, scratch);
+
+        if (!plaintextOk)
+            return tryDecodeStaticTelemetryEncrypted(mp, fields, scratch, sizeof(*scratch));
+
+        if ((p.portnum == meshtastic_PortNum_POSITION_APP || p.portnum == meshtastic_PortNum_TELEMETRY_APP) &&
+            staticTelemetryKeyConfigured() && !payloadRoundTripsPlausibly(p.payload.bytes, p.payload.size, fields, scratch)) {
+            T decrypted;
+            if (tryDecodeStaticTelemetryEncrypted(mp, fields, &decrypted, sizeof(decrypted))) {
+                *scratch = decrypted;
+                LOG_INFO("%s payload didn't round-trip as plaintext, used static-key decrypt instead", name);
+            }
+        }
+
+        return true;
+    }
+
     /** Called to handle a particular incoming message
 
     @return ProcessMessage::STOP if you've guaranteed you've handled this message and no other handlers should be considered for
@@ -88,19 +132,10 @@ template <class T> class ProtobufModule : protected SinglePortModule
         T *decoded = NULL;
         if (mp.which_payload_variant == meshtastic_MeshPacket_decoded_tag && mp.decoded.portnum == ourPortNum) {
             memset(&scratch, 0, sizeof(scratch));
-            if (pb_decode_from_bytes(p.payload.bytes, p.payload.size, fields, &scratch)) {
+            if (decodeStaticTelemetryAware(mp, &scratch)) {
                 decoded = &scratch;
                 LOG_INFO("Received %s from=0x%0x, id=0x%x, portnum=%d, payloadlen=%d", name, mp.from, mp.id, p.portnum,
                          p.payload.size);
-            } else if (tryDecodeStaticTelemetryEncrypted(mp, fields, &scratch, sizeof(scratch))) {
-                // Fork customization: didn't decode as plaintext - if this is
-                // Position/Telemetry and we have a static telemetry key configured
-                // (see StaticTelemetryKey.h), try decrypting it and re-parsing. This
-                // is what lets two modded nodes exchange encrypted position/telemetry
-                // transparently over LoRa, without MQTT/HA in the loop at all.
-                decoded = &scratch;
-                LOG_INFO("Received %s (static-key decrypted) from=0x%0x, id=0x%x, portnum=%d", name, mp.from, mp.id,
-                         p.portnum);
             } else {
                 LOG_ERROR("Error decoding proto module!");
                 // if we can't decode it, nobody can process it!
@@ -119,11 +154,7 @@ template <class T> class ProtobufModule : protected SinglePortModule
         T *decoded = NULL;
         if (mp.which_payload_variant == meshtastic_MeshPacket_decoded_tag && mp.decoded.portnum == ourPortNum) {
             memset(&scratch, 0, sizeof(scratch));
-            const meshtastic_Data &p = mp.decoded;
-            if (pb_decode_from_bytes(p.payload.bytes, p.payload.size, fields, &scratch)) {
-                decoded = &scratch;
-            } else if (tryDecodeStaticTelemetryEncrypted(mp, fields, &scratch, sizeof(scratch))) {
-                // Fork customization: see the matching branch in handleReceived() above.
+            if (decodeStaticTelemetryAware(mp, &scratch)) {
                 decoded = &scratch;
             } else {
                 LOG_ERROR("Error decoding proto module!");

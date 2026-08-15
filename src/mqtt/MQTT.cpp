@@ -7,6 +7,7 @@
 #include "main.h"
 #include "mesh/Channels.h"
 #include "mesh/Router.h"
+#include "mesh/StaticTelemetryKey.h"
 #include "mesh/generated/meshtastic/mqtt.pb.h"
 #include "mesh/generated/meshtastic/telemetry.pb.h"
 #include "modules/RoutingModule.h"
@@ -769,6 +770,11 @@ void MQTT::onSend(const meshtastic_MeshPacket &mp_encrypted, const meshtastic_Me
         return; // Don't send messages that came from MQTT back into MQTT
     bool uplinkEnabled = false;
     for (int i = 0; i <= 7; i++) {
+        // Fork customization: channel MESHTASTIC_STATIC_TELEMETRY_KEY_CHANNEL_INDEX
+        // is reserved for static-telemetry-key storage (see StaticTelemetryKey.h)
+        // and must never be treated as a real, uplink-eligible channel.
+        if (i == MESHTASTIC_STATIC_TELEMETRY_KEY_CHANNEL_INDEX)
+            continue;
         if (channels.getByIndex(i).settings.uplink_enabled)
             uplinkEnabled = true;
     }

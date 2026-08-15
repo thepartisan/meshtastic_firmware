@@ -7,7 +7,6 @@
 #include "RTC.h"
 #include "RadioLibInterface.h"
 #include "Router.h"
-#include "StaticTelemetryKey.h"
 #include "TransmitHistory.h"
 #include "configuration.h"
 #include "main.h"
@@ -198,10 +197,10 @@ bool DeviceTelemetryModule::sendTelemetry(NodeNum dest, bool phoneOnly)
         service->sendToPhone(p);
     } else {
         LOG_INFO("Send packet to mesh");
-        // Fork customization: encrypt the payload with a static, pre-shared key before
-        // the normal channel-PSK layer, if one is configured - see StaticTelemetryKey.h.
-        // No-op if none is configured.
-        encryptStaticTelemetryPayload(p);
+        // Fork customization: MeshService::sendToMesh() applies the static
+        // telemetry key (if configured) centrally - see StaticTelemetryKey.h - so
+        // the phone/CLI echo of this packet still shows the real plaintext
+        // telemetry.
         service->sendToMesh(p, RX_SRC_LOCAL, true);
     }
     return true;

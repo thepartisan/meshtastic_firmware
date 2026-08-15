@@ -5,6 +5,7 @@
 #include "DisplayFormatters.h"
 #include "NodeDB.h"
 #include "RadioInterface.h"
+#include "StaticTelemetryKey.h"
 #include "configuration.h"
 
 #include <assert.h>
@@ -347,10 +348,16 @@ bool Channels::anyMqttEnabled()
         return false;
     }
 #endif
-    for (int i = 0; i < getNumChannels(); i++)
+    for (int i = 0; i < getNumChannels(); i++) {
+        // Fork customization: channel MESHTASTIC_STATIC_TELEMETRY_KEY_CHANNEL_INDEX
+        // is reserved for static-telemetry-key storage (see StaticTelemetryKey.h)
+        // and must never be treated as a real, uplink-eligible channel.
+        if (i == MESHTASTIC_STATIC_TELEMETRY_KEY_CHANNEL_INDEX)
+            continue;
         if (channelFile.channels[i].role != meshtastic_Channel_Role_DISABLED && channelFile.channels[i].has_settings &&
             (channelFile.channels[i].settings.downlink_enabled || channelFile.channels[i].settings.uplink_enabled))
             return true;
+    }
 
     return false;
 }
