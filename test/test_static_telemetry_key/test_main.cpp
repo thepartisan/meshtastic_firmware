@@ -9,6 +9,12 @@
 
 static void resetChannel7()
 {
+    // Channels::getByIndex() returns the unrelated dummyChannel fallback unless
+    // channels_count covers the requested index - the native test harness doesn't
+    // run the normal boot sequence (Channels::initDefaults()) that sets this on a
+    // real device, so it must be set explicitly here (see test_mqtt/MQTT.cpp for
+    // the same requirement).
+    channelFile.channels_count = MAX_NUM_CHANNELS;
     channelFile.channels[MESHTASTIC_STATIC_TELEMETRY_KEY_CHANNEL_INDEX] = meshtastic_Channel_init_zero;
 }
 
