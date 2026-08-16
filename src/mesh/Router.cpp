@@ -6,6 +6,7 @@
 #include "NodeDB.h"
 #include "PositionPrecision.h"
 #include "RTC.h"
+#include "StaticTelemetryKey.h"
 
 #include "configuration.h"
 #include "main.h"
@@ -359,6 +360,17 @@ ErrorCode Router::send(meshtastic_MeshPacket *p)
             packetPool.release(p);
             return meshtastic_Routing_Error_BAD_REQUEST;
         }
+
+        // Fork customization: apply the static telemetry key (if configured -
+        // see StaticTelemetryKey.h) only now, after position-precision truncation
+        // has run on genuine plaintext coordinates, and before perhapsEncode()
+        // below applies the normal channel-PSK layer. Doing this any earlier (e.g.
+        // in MeshService::sendToMesh(), before Router::send() is even reached)
+        // feeds ciphertext into applyPositionPrecisionForChannel()'s plaintext
+        // pb_decode_from_bytes() above, which fails and silently drops the whole
+        // packet via the "malformed position packet" branch - originator-only,
+        // same as the precision step, so relayed packets are never touched.
+        encryptStaticTelemetryPayload(p);
     }
 
     // If the packet is not yet encrypted, do so now

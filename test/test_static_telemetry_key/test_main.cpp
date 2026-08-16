@@ -2,6 +2,7 @@
 // fork customization that lets Position/Telemetry payloads carry an extra,
 // pre-shared-key AES-CTR encryption layer, keyed off channel 7's PSK.
 #include "NodeDB.h"
+#include "PositionPrecision.h"
 #include "StaticTelemetryKey.h"
 #include "TestUtil.h"
 #include "mesh-pb-constants.h"
@@ -258,6 +259,64 @@ static void test_roundTrip_rejectsPayloadWithUnrecognizedTrailingField()
     TEST_ASSERT_FALSE(payloadRoundTripsPlausibly(padded, paddedLen, &meshtastic_Position_msg, &decoded));
 }
 
+// ---------------------------------------------------------------------------
+// Send-path ordering: encryptStaticTelemetryPayload() must run *after*
+// applyPositionPrecisionForChannel(), never before
+// ---------------------------------------------------------------------------
+
+// Regression test for a real bug that shipped briefly: encryptStaticTelemetryPayload()
+// must run *after* applyPositionPrecisionForChannel() (which needs genuine
+// plaintext to pb_decode_from_bytes() and truncate coordinates), never before -
+// encrypting first feeds ciphertext into that plaintext decode, which fails and
+// makes Router::send() silently drop the whole packet ("Dropping malformed
+// position packet before send"). Router.cpp applies the static key inside the
+// isFromUs(p) block, immediately *after* applyPositionPrecisionForChannel()
+// succeeds - not any earlier (e.g. not in MeshService::sendToMesh(), which runs
+// before Router::send() is even reached).
+static void test_positionPrecisionOrdering_encryptingBeforePrecisionCheckFailsToDecode()
+{
+    setChannel7Psk(meshtastic_Channel_Role_SECONDARY, kTestKey, sizeof(kTestKey));
+
+    meshtastic_Channel &ch0 = channelFile.channels[0];
+    ch0 = meshtastic_Channel_init_zero;
+    ch0.has_settings = true;
+    ch0.settings.has_module_settings = true;
+    ch0.settings.module_settings.position_precision = 32;
+
+    meshtastic_Position original = makeTestPosition();
+    meshtastic_MeshPacket p = makePositionPacket(original, 0x11223344, 42);
+    p.channel = 0;
+
+    // Wrong order (the bug): encrypt first, then try to apply position precision.
+    encryptStaticTelemetryPayload(&p);
+    TEST_ASSERT_FALSE(applyPositionPrecisionForChannel(p, p.channel));
+}
+
+static void test_positionPrecisionOrdering_correctOrderSucceeds()
+{
+    setChannel7Psk(meshtastic_Channel_Role_SECONDARY, kTestKey, sizeof(kTestKey));
+
+    meshtastic_Channel &ch0 = channelFile.channels[0];
+    ch0 = meshtastic_Channel_init_zero;
+    ch0.has_settings = true;
+    ch0.settings.has_module_settings = true;
+    ch0.settings.module_settings.position_precision = 32;
+
+    meshtastic_Position original = makeTestPosition();
+    meshtastic_MeshPacket p = makePositionPacket(original, 0x11223344, 42);
+    p.channel = 0;
+
+    // Correct order, matching Router::send(): precision truncation on genuine
+    // plaintext first, then static-key encryption.
+    TEST_ASSERT_TRUE(applyPositionPrecisionForChannel(p, p.channel));
+    encryptStaticTelemetryPayload(&p);
+
+    meshtastic_Position decrypted = meshtastic_Position_init_zero;
+    TEST_ASSERT_TRUE(tryDecodeStaticTelemetryEncrypted(p, &meshtastic_Position_msg, &decrypted, sizeof(decrypted)));
+    TEST_ASSERT_EQUAL_INT32(original.latitude_i, decrypted.latitude_i);
+    TEST_ASSERT_EQUAL_INT32(original.longitude_i, decrypted.longitude_i);
+}
+
 void setUp(void) {}
 
 void tearDown(void) { resetChannel7(); }
@@ -278,6 +337,8 @@ void setup()
     RUN_TEST(test_tryDecode_wrongKeyDoesNotRecoverOriginal);
     RUN_TEST(test_roundTrip_genuinePlaintextRoundTrips);
     RUN_TEST(test_roundTrip_rejectsPayloadWithUnrecognizedTrailingField);
+    RUN_TEST(test_positionPrecisionOrdering_encryptingBeforePrecisionCheckFailsToDecode);
+    RUN_TEST(test_positionPrecisionOrdering_correctOrderSucceeds);
     exit(UNITY_END());
 }
 

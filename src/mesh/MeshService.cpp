@@ -11,7 +11,6 @@
 #include "NodeDB.h"
 #include "PowerFSM.h"
 #include "RTC.h"
-#include "StaticTelemetryKey.h"
 #include "TypeConversions.h"
 #include "graphics/draw/MessageRenderer.h"
 #include "main.h"
@@ -250,10 +249,12 @@ void MeshService::sendToMesh(meshtastic_MeshPacket *p, RxSource src, bool ccToPh
     uint32_t mesh_packet_id = p->id;
     nodeDB->updateFrom(*p); // update our local DB for this packet (because phone might have sent position packets etc...)
 
-    // Fork customization: snapshot the phone/CLI echo copy *before* applying the
-    // static telemetry key below (see StaticTelemetryKey.h). Stock apps have no way
-    // to decrypt that fork-only layer, so without this snapshot the sending
-    // device's own live view of a packet it just sent would show garbage for
+    // Fork customization: snapshot the phone/CLI echo copy *before* router->sendLocal()
+    // below, which eventually applies the static telemetry key deep inside
+    // Router::send() (see StaticTelemetryKey.h - and the comment there on why it
+    // has to happen at that specific point, not here). Stock apps have no way to
+    // decrypt that fork-only layer, so without this snapshot the sending device's
+    // own live view of a packet it just sent would show garbage for
     // Position/Telemetry the moment the feature is enabled. sendToPhone() already
     // routinely accepts plain (undecoded_tag) packets that never went through
     // Router::send() at all (e.g. DeviceTelemetryModule's phone-only stats), so
@@ -264,8 +265,6 @@ void MeshService::sendToMesh(meshtastic_MeshPacket *p, RxSource src, bool ccToPh
         phoneCopy = packetPool.allocCopy(*p);
         DEBUG_HEAP_AFTER("MeshService::sendToMesh", phoneCopy);
     }
-
-    encryptStaticTelemetryPayload(p);
 
     // Note: We might return !OK if our fifo was full, at that point the only option we have is to drop it
     ErrorCode res = router->sendLocal(p, src);
