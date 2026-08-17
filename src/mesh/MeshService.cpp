@@ -11,6 +11,7 @@
 #include "NodeDB.h"
 #include "PowerFSM.h"
 #include "RTC.h"
+#include "StaticTelemetryKey.h"
 #include "TypeConversions.h"
 #include "graphics/draw/MessageRenderer.h"
 #include "main.h"
@@ -110,7 +111,17 @@ int MeshService::handleFromRadio(const meshtastic_MeshPacket *mp)
     }
 
     printPacket("Forwarding to phone", mp);
-    sendToPhone(packetPool.allocCopy(*mp));
+
+    // Fork customization: hand the phone a *decrypted* Position/Telemetry payload.
+    // Client apps parse Data.payload themselves rather than asking us what we
+    // decoded, so without this they just see our static-key ciphertext and fail to
+    // parse it. Safe to do here (and only here): this copy is exclusively the
+    // phone's, and any rebroadcast of the original was already queued upstream in
+    // RoutingModule - see the comment on the function in StaticTelemetryKey.h.
+    meshtastic_MeshPacket *forPhone = packetPool.allocCopy(*mp);
+    if (decryptStaticTelemetryPayloadInPlace(forPhone))
+        LOG_INFO("Decrypted static-key payload for phone (portnum=%d, id=0x%x)", forPhone->decoded.portnum, forPhone->id);
+    sendToPhone(forPhone);
 
     return 0;
 }

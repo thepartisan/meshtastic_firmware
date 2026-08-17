@@ -284,6 +284,81 @@ static void test_tryDecode_usesActualChannel7KeyRegardlessOfRole_evenWhenDisable
 }
 
 // ---------------------------------------------------------------------------
+// decryptStaticTelemetryPayloadInPlace(): what the phone/client app is handed
+//
+// Client apps parse Data.payload themselves rather than asking the node what it
+// decoded, so MeshService::handleFromRadio() rewrites the phone's copy in place.
+// ---------------------------------------------------------------------------
+
+static void test_decryptInPlace_rewritesEncryptedPayloadToPlaintext()
+{
+    setChannel7Psk(meshtastic_Channel_Role_DISABLED, kTestKey, sizeof(kTestKey));
+
+    meshtastic_Position original = makeTestPosition();
+    meshtastic_MeshPacket p = makePositionPacket(original, 0x11223344, 42);
+    meshtastic_Data plaintext = p.decoded;
+
+    encryptStaticTelemetryPayload(&p);
+    TEST_ASSERT_TRUE(memcmp(plaintext.payload.bytes, p.decoded.payload.bytes, plaintext.payload.size) != 0);
+
+    TEST_ASSERT_TRUE(decryptStaticTelemetryPayloadInPlace(&p));
+
+    // The packet now carries the original plaintext bytes verbatim, so a stock
+    // client app parsing Data.payload directly sees a normal Position.
+    TEST_ASSERT_EQUAL_UINT32(plaintext.payload.size, p.decoded.payload.size);
+    TEST_ASSERT_EQUAL_MEMORY(plaintext.payload.bytes, p.decoded.payload.bytes, plaintext.payload.size);
+
+    meshtastic_Position asApp = meshtastic_Position_init_zero;
+    TEST_ASSERT_TRUE(pb_decode_from_bytes(p.decoded.payload.bytes, p.decoded.payload.size, &meshtastic_Position_msg, &asApp));
+    TEST_ASSERT_EQUAL_INT32(original.latitude_i, asApp.latitude_i);
+    TEST_ASSERT_EQUAL_INT32(original.longitude_i, asApp.longitude_i);
+}
+
+// A stock node's unencrypted Position must pass through completely untouched -
+// this fork must never corrupt traffic that isn't using the feature.
+static void test_decryptInPlace_leavesGenuinePlaintextUntouched()
+{
+    setChannel7Psk(meshtastic_Channel_Role_DISABLED, kTestKey, sizeof(kTestKey));
+
+    meshtastic_Position original = makeTestPosition();
+    meshtastic_MeshPacket p = makePositionPacket(original, 0x11223344, 42);
+    meshtastic_Data before = p.decoded;
+
+    TEST_ASSERT_FALSE(decryptStaticTelemetryPayloadInPlace(&p));
+
+    TEST_ASSERT_EQUAL_UINT32(before.payload.size, p.decoded.payload.size);
+    TEST_ASSERT_EQUAL_MEMORY(before.payload.bytes, p.decoded.payload.bytes, before.payload.size);
+}
+
+static void test_decryptInPlace_noOpWhenNotConfiguredOrWrongPortnum()
+{
+    // Encrypt while a key is configured...
+    setChannel7Psk(meshtastic_Channel_Role_DISABLED, kTestKey, sizeof(kTestKey));
+    meshtastic_MeshPacket p = makePositionPacket(makeTestPosition(), 0x11223344, 42);
+    encryptStaticTelemetryPayload(&p);
+    meshtastic_Data ciphertext = p.decoded;
+
+    // ...then drop the key: nothing to decrypt with, payload must survive as-is.
+    resetChannel7();
+    TEST_ASSERT_FALSE(decryptStaticTelemetryPayloadInPlace(&p));
+    TEST_ASSERT_EQUAL_MEMORY(ciphertext.payload.bytes, p.decoded.payload.bytes, ciphertext.payload.size);
+
+    // A non-Position/Telemetry portnum is never touched either.
+    setChannel7Psk(meshtastic_Channel_Role_DISABLED, kTestKey, sizeof(kTestKey));
+    meshtastic_MeshPacket text = meshtastic_MeshPacket_init_zero;
+    text.from = 0x11223344;
+    text.id = 1;
+    text.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+    text.decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP;
+    const char *msg = "hello mesh";
+    text.decoded.payload.size = strlen(msg);
+    memcpy(text.decoded.payload.bytes, msg, text.decoded.payload.size);
+
+    TEST_ASSERT_FALSE(decryptStaticTelemetryPayloadInPlace(&text));
+    TEST_ASSERT_EQUAL_MEMORY(msg, text.decoded.payload.bytes, strlen(msg));
+}
+
+// ---------------------------------------------------------------------------
 // payloadRoundTripsPlausibly(): the receive-side plaintext-vs-ciphertext heuristic
 // ---------------------------------------------------------------------------
 
@@ -408,6 +483,9 @@ void setup()
     RUN_TEST(test_tryDecode_wrongKeyDoesNotRecoverOriginal);
     RUN_TEST(test_encrypt_usesActualChannel7KeyRegardlessOfRole);
     RUN_TEST(test_tryDecode_usesActualChannel7KeyRegardlessOfRole_evenWhenDisabled);
+    RUN_TEST(test_decryptInPlace_rewritesEncryptedPayloadToPlaintext);
+    RUN_TEST(test_decryptInPlace_leavesGenuinePlaintextUntouched);
+    RUN_TEST(test_decryptInPlace_noOpWhenNotConfiguredOrWrongPortnum);
     RUN_TEST(test_roundTrip_genuinePlaintextRoundTrips);
     RUN_TEST(test_roundTrip_rejectsPayloadWithUnrecognizedTrailingField);
     RUN_TEST(test_positionPrecisionOrdering_encryptingBeforePrecisionCheckFailsToDecode);
