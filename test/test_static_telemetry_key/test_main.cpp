@@ -213,6 +213,77 @@ static void test_tryDecode_wrongKeyDoesNotRecoverOriginal()
 }
 
 // ---------------------------------------------------------------------------
+// Regression tests: channel 7 left at its default role (DISABLED) must still
+// load its *actual* key - not silently fall through to whatever key the
+// crypto engine happened to have active from an unrelated prior operation.
+//
+// Channels::getKey() independently refuses to load a key for a DISABLED-role
+// channel, even though staticTelemetryKeyConfigured() deliberately treats
+// DISABLED as a valid "on" state (see StaticTelemetryKey.h's header comment).
+// Without ignoreRoleForKey=true threaded through to Channels::getKey(),
+// encryptStaticTelemetryPayload()/tryDecodeStaticTelemetryEncrypted() would
+// silently encrypt/decrypt with a stale key and never touch channel 7's PSK
+// at all - producing plausible-looking garbage instead of an error. Each test
+// below first points the crypto engine at an unrelated decoy key via
+// channels.setActiveByIndex(0) so a reintroduced bug can't hide behind
+// AES-CTR's self-cancelling property (encrypting then decrypting with the
+// *same* wrong key still "round-trips" - only using channel 7's actual key
+// both times, or comparing against a known-good reference, catches this).
+// ---------------------------------------------------------------------------
+
+static void pointCryptoEngineAtDecoyChannel0Key(uint8_t fillByte)
+{
+    meshtastic_Channel &ch0 = channelFile.channels[0];
+    ch0 = meshtastic_Channel_init_zero;
+    ch0.has_settings = true;
+    ch0.role = meshtastic_Channel_Role_PRIMARY;
+    memset(ch0.settings.psk.bytes, fillByte, 32);
+    ch0.settings.psk.size = 32;
+    channels.setActiveByIndex(0);
+}
+
+static void test_encrypt_usesActualChannel7KeyRegardlessOfRole()
+{
+    meshtastic_Position original = makeTestPosition();
+
+    // Reference: encrypt with role SECONDARY, the known-good path.
+    setChannel7Psk(meshtastic_Channel_Role_SECONDARY, kTestKey, sizeof(kTestKey));
+    meshtastic_MeshPacket referencePacket = makePositionPacket(original, 0x11223344, 42);
+    encryptStaticTelemetryPayload(&referencePacket);
+
+    // Disrupt the crypto engine's active key, then encrypt the same
+    // plaintext/packet/key with role DISABLED - the config
+    // staticTelemetryKeyConfigured() claims to support.
+    pointCryptoEngineAtDecoyChannel0Key(0x77);
+    setChannel7Psk(meshtastic_Channel_Role_DISABLED, kTestKey, sizeof(kTestKey));
+    meshtastic_MeshPacket disabledRolePacket = makePositionPacket(original, 0x11223344, 42);
+    encryptStaticTelemetryPayload(&disabledRolePacket);
+
+    // If DISABLED-role encryption used channel 7's key (as it must), it
+    // produces byte-identical ciphertext to the SECONDARY-role reference.
+    TEST_ASSERT_EQUAL_UINT32(referencePacket.decoded.payload.size, disabledRolePacket.decoded.payload.size);
+    TEST_ASSERT_EQUAL_MEMORY(referencePacket.decoded.payload.bytes, disabledRolePacket.decoded.payload.bytes,
+                             referencePacket.decoded.payload.size);
+}
+
+static void test_tryDecode_usesActualChannel7KeyRegardlessOfRole_evenWhenDisabled()
+{
+    setChannel7Psk(meshtastic_Channel_Role_DISABLED, kTestKey, sizeof(kTestKey));
+    meshtastic_Position original = makeTestPosition();
+    meshtastic_MeshPacket p = makePositionPacket(original, 0x11223344, 42);
+    encryptStaticTelemetryPayload(&p);
+
+    // Disrupt the crypto engine's active key between encrypt and decrypt.
+    pointCryptoEngineAtDecoyChannel0Key(0x55);
+
+    meshtastic_Position decrypted = meshtastic_Position_init_zero;
+    TEST_ASSERT_TRUE(tryDecodeStaticTelemetryEncrypted(p, &meshtastic_Position_msg, &decrypted, sizeof(decrypted)));
+    TEST_ASSERT_EQUAL_INT32(original.latitude_i, decrypted.latitude_i);
+    TEST_ASSERT_EQUAL_INT32(original.longitude_i, decrypted.longitude_i);
+    TEST_ASSERT_EQUAL_INT32(original.altitude, decrypted.altitude);
+}
+
+// ---------------------------------------------------------------------------
 // payloadRoundTripsPlausibly(): the receive-side plaintext-vs-ciphertext heuristic
 // ---------------------------------------------------------------------------
 
@@ -335,6 +406,8 @@ void setup()
     RUN_TEST(test_encryptThenDecrypt_recoversOriginalPosition);
     RUN_TEST(test_tryDecode_failsWithoutKeyConfigured);
     RUN_TEST(test_tryDecode_wrongKeyDoesNotRecoverOriginal);
+    RUN_TEST(test_encrypt_usesActualChannel7KeyRegardlessOfRole);
+    RUN_TEST(test_tryDecode_usesActualChannel7KeyRegardlessOfRole_evenWhenDisabled);
     RUN_TEST(test_roundTrip_genuinePlaintextRoundTrips);
     RUN_TEST(test_roundTrip_rejectsPayloadWithUnrecognizedTrailingField);
     RUN_TEST(test_positionPrecisionOrdering_encryptingBeforePrecisionCheckFailsToDecode);

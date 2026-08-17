@@ -206,7 +206,7 @@ void Channels::initDefaultChannel(ChannelIndex chIndex)
     }
 }
 
-CryptoKey Channels::getKey(ChannelIndex chIndex)
+CryptoKey Channels::getKey(ChannelIndex chIndex, bool ignoreRoleForKey)
 {
     meshtastic_Channel &ch = getByIndex(chIndex);
     const meshtastic_ChannelSettings &channelSettings = ch.settings;
@@ -214,7 +214,7 @@ CryptoKey Channels::getKey(ChannelIndex chIndex)
     CryptoKey k;
     memset(k.bytes, 0, sizeof(k.bytes)); // In case the user provided a short key, we want to pad the rest with zeros
 
-    if (!ch.has_settings || ch.role == meshtastic_Channel_Role_DISABLED) {
+    if (!ch.has_settings || (ch.role == meshtastic_Channel_Role_DISABLED && !ignoreRoleForKey)) {
         k.length = -1; // invalid
     } else {
         memcpy(k.bytes, channelSettings.psk.bytes, channelSettings.psk.size);
@@ -258,9 +258,9 @@ CryptoKey Channels::getKey(ChannelIndex chIndex)
 
 /** Given a channel index, change to use the crypto key specified by that index
  */
-int16_t Channels::setCrypto(ChannelIndex chIndex)
+int16_t Channels::setCrypto(ChannelIndex chIndex, bool ignoreRoleForKey)
 {
-    CryptoKey k = getKey(chIndex);
+    CryptoKey k = getKey(chIndex, ignoreRoleForKey);
 
     if (k.length < 0)
         return -1;
@@ -459,7 +459,7 @@ bool Channels::setDefaultPresetCryptoForHash(ChannelHash channelHash)
  *
  * @return the (0 to 255) hash for that channel - if no suitable channel could be found, return -1
  */
-int16_t Channels::setActiveByIndex(ChannelIndex channelIndex)
+int16_t Channels::setActiveByIndex(ChannelIndex channelIndex, bool ignoreRoleForKey)
 {
-    return setCrypto(channelIndex);
+    return setCrypto(channelIndex, ignoreRoleForKey);
 }

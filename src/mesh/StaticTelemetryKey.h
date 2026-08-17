@@ -41,6 +41,20 @@
  * needs a specific channel's key already calls it again immediately before its own
  * crypto operation, so there's no code path relying on the "active" key surviving
  * between unrelated operations.
+ *
+ * Critical detail: Channels::getKey() itself still refuses to load a channel's key
+ * at all when that channel's role is DISABLED (returns an invalid key without
+ * touching the crypto engine, leaving whatever key was active from the *previous*
+ * operation silently in place - normally harmless, since every other caller
+ * immediately overwrites it before its own crypto op, but it means a caller who
+ * skips loading a key here gets garbage instead of an error). Since
+ * staticTelemetryKeyConfigured() deliberately allows role DISABLED (the factory
+ * default the moment a PSK is set without also touching role - see above), both
+ * calls below pass ignoreRoleForKey=true to Channels::setActiveByIndex() so the key
+ * actually gets loaded regardless of role. Forgetting this on either call silently
+ * encrypts/decrypts with the *previous* channel's key instead of channel 7's -
+ * producing plausible-looking garbage that fails every downstream check, not an
+ * obvious error.
  */
 #define MESHTASTIC_STATIC_TELEMETRY_KEY_CHANNEL_INDEX 7
 
@@ -78,7 +92,7 @@ inline void encryptStaticTelemetryPayload(meshtastic_MeshPacket *p)
     if (!staticTelemetryKeyConfigured())
         return;
 
-    channels.setActiveByIndex(MESHTASTIC_STATIC_TELEMETRY_KEY_CHANNEL_INDEX);
+    channels.setActiveByIndex(MESHTASTIC_STATIC_TELEMETRY_KEY_CHANNEL_INDEX, /*ignoreRoleForKey=*/true);
     crypto->encryptPacket(getFrom(p), p->id, p->decoded.payload.size, p->decoded.payload.bytes);
 }
 
@@ -111,7 +125,7 @@ inline bool tryDecodeStaticTelemetryEncrypted(const meshtastic_MeshPacket &mp, c
     uint8_t buf[sizeof(mp.decoded.payload.bytes)];
     memcpy(buf, mp.decoded.payload.bytes, len);
 
-    channels.setActiveByIndex(MESHTASTIC_STATIC_TELEMETRY_KEY_CHANNEL_INDEX);
+    channels.setActiveByIndex(MESHTASTIC_STATIC_TELEMETRY_KEY_CHANNEL_INDEX, /*ignoreRoleForKey=*/true);
     crypto->decrypt(getFrom(&mp), mp.id, len, buf);
 
     memset(scratch, 0, scratchSize);

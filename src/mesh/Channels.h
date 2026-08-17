@@ -79,9 +79,14 @@ class Channels
      *
      * This method is called before encoding outbound packets
      *
+     * @param ignoreRoleForKey Fork customization: if true, load the channel's key even if its role is
+     * DISABLED (still requires has_settings and a non-empty PSK). Used only by StaticTelemetryKey.h,
+     * whose whole point is a key that lives on a channel slot that's otherwise never used for routing -
+     * normal callers must never pass true, since a DISABLED channel's key is meant to stay unused.
+     *
      * @eturn the (0 to 255) hash for that channel - if no suitable channel could be found, return -1
      */
-    int16_t setActiveByIndex(ChannelIndex channelIndex);
+    int16_t setActiveByIndex(ChannelIndex channelIndex, bool ignoreRoleForKey = false);
 
     // Returns true if the channel has the default name and PSK
     bool isDefaultChannel(ChannelIndex chIndex);
@@ -103,7 +108,7 @@ class Channels
      *
      * @eturn the (0 to 255) hash for that channel - if no suitable channel could be found, return -1
      */
-    int16_t setCrypto(ChannelIndex chIndex);
+    int16_t setCrypto(ChannelIndex chIndex, bool ignoreRoleForKey = false);
 
     /** Return the channel index for the specified channel hash, or -1 for not found */
     int8_t getIndexByHash(ChannelHash channelHash);
@@ -134,7 +139,7 @@ class Channels
      * Return the key used for encrypting this channel (if channel is secondary and no key provided, use the primary channel's
      * PSK)
      */
-    CryptoKey getKey(ChannelIndex chIndex);
+    CryptoKey getKey(ChannelIndex chIndex, bool ignoreRoleForKey = false);
 };
 
 /// Singleton channel table
